@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"sync"
 
-	"github.com/dailyburn/ratchet/data"
-	"github.com/dailyburn/ratchet/logger"
-	"github.com/dailyburn/ratchet/util"
+	"github.com/snydersalvage/ratchet/data"
+	"github.com/snydersalvage/ratchet/logger"
+	"github.com/snydersalvage/ratchet/util"
 )
 
 // StartSignal is what's sent to a starting DataProcessor
@@ -24,6 +24,12 @@ type Pipeline struct {
 	PrintData    bool   // Set to true to log full data payloads (only in Debug logging mode).
 	timer        *util.Timer
 	wg           sync.WaitGroup
+}
+
+// PipelineIface provides an interface to enable mocking the Pipeline.
+// This makes unit testing your code that uses pipelines easier.
+type PipelineIface interface {
+	Run() chan error
 }
 
 // NewPipeline creates a new pipeline ready to run the given DataProcessors.
@@ -117,14 +123,24 @@ func (p *Pipeline) runStages(killChan chan error) {
 				// This is where the main DataProcessor interface
 				// functions are called.
 				logger.Info(p.Name, "- stage", n+1, dp, "waiting to receive data")
+
+				// Store a bunch of channels, so we can wait on their output without messing up the order of operations.
+				exitChans := []chan bool{}
+
 				for d := range dp.inputChan {
 					logger.Info(p.Name, "- stage", n+1, dp, "received data")
 					if p.PrintData {
 						logger.Debug(p.Name, "- stage", n+1, dp, "data =", string(d))
 					}
 					dp.recordDataReceived(d)
-					dp.processData(d, killChan)
+					exitChans = append(exitChans, dp.processData(d, killChan))
 				}
+
+				// Wait until everything is finished before calling dp.Finish.  Since execution happens asynchronously, we may still be waiting on a processData call to return.
+				for i := range exitChans {
+					<-exitChans[i]
+				}
+
 				logger.Info(p.Name, "- stage", n+1, dp, "input closed, calling Finish")
 				dp.Finish(dp.outputChan, killChan)
 				if dp.outputChan != nil {
